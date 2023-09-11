@@ -158,10 +158,14 @@ if __name__ == "__main__":
         sys.exit(1)
     action = GraspAction(grasp_2d, grasp.q_value, thumbnail)
 
+    print("Grasp Center:", grasp_2d.center)
+    print("Grasp Angle: ", grasp_2d.angle)
+    print("Grasp Depth: ", grasp_2d.depth)
+
     # Vis final grasp.
     if vis_grasp:
         vis.figure(size=(10, 10))
         vis.imshow(depth_im, vmin=0.6, vmax=0.9)
-        vis.grasp(action.grasp, scale=2.5, show_center=False, show_axis=True)
+        vis.grasp(action.grasp, scale=2.5, show_center=True, show_axis=True)
         vis.title("Planned grasp on depth (Q=%.3f)" % (action.q_value))
         vis.show()
