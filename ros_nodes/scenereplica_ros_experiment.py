@@ -40,13 +40,14 @@ import datetime
 import threading
 import pickle
 from matplotlib import pyplot as plt
+import cv2
 
 from cv_bridge import CvBridge, CvBridgeError
 import ros_numpy
 import rosnode
 import message_filters
 import tf2_ros
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image as ImageMsg, CameraInfo
 from geometry_msgs.msg import PointStamped
 
 from autolab_core import (Point, Logger, BinaryImage, CameraIntrinsics,
@@ -110,6 +111,8 @@ class ImageToGraspPub:
         self.step = 0  # indicator for whether a new pc is registered
 
         self.grasp_pub = rospy.Publisher("grasp2D", PointStamped, queue_size=10)
+        self.dexnet_vis_pub = rospy.Publisher('/vis/dexnet', ImageMsg, queue_size=10)
+        self.pub_rate = rospy.Rate(10)
         # depth_sub = message_filters.Subscriber('/topdown_depth_img', Image, queue_size=10)
         # mask_sub  = message_filters.Subscriber("/topdown_depth_mask", Image, queue_size=10)
         queue_size = 1
@@ -174,17 +177,6 @@ class ImageToGraspPub:
         segmask  = BinaryImage(mask_data.astype(np.uint8), frame=self.camera_intr.frame)
         color_im = ColorImage(np.zeros([depth_im.height, depth_im.width, 3]).astype(np.uint8), frame=self.camera_intr.frame)
 
-        # if self.visualize:
-        #     vis.figure(size=(10, 10))
-        #     vis.imshow(depth_im, vmin=0.5, vmax=0.9)
-        #     vis.title("Depth")
-        #     vis.show()
-
-        #     vis.figure(size=(10, 10))
-        #     vis.imshow(segmask, vmin=0.5, vmax=0.9)
-        #     vis.title("Mask")
-        #     vis.show()
-
         print("[LISTENER] Predicting Grasps....")
         grasp_response = plan_grasp_segmask(color_im.rosmsg, depth_im.rosmsg, camera_intr.rosmsg, segmask.rosmsg)
         grasp = grasp_response.grasp
@@ -201,9 +193,23 @@ class ImageToGraspPub:
             vis.imshow(depth_im, vmin=0.6, vmax=0.9)
             vis.grasp(grasp_2d, scale=2.5, show_center=True, show_axis=True)
             vis.title("Planned grasp on depth (Q=%.3f)" % (grasp.q_value))
-            vis.show()
+            vis_filename = os.path.join(self.data_dir, f"output_img_{self.step}.png")
+            vis.show(vis_filename)
+
+        # IF VIS_TRUE, THEN ALSO PUBLISH THE IMAGE FILE
+        # TODO: LOAD THE FILE FROM DISK 
+        dexnet_vis_image = cv2.imread(vis_filename)
+        dexnet_vis_image = cv2.cvtColor(dexnet_vis_image, cv2.COLOR_BGR2RGB)
+        # TODO: USE this image to publish to rviz here
+
+        # publish the image
+        img_msg = ros_numpy.msgify(ImageMsg, dexnet_vis_image, encoding='rgb8')
+        self.dexnet_vis_pub.publish(img_msg)
+        self.pub_rate.sleep()
 
         # Publish the Grasps as a PointStamped message
+        # Not really publishing!!!
+        
         print("[LISTENER] Publishing/Saving...")
         np.savetxt(os.path.join(self.data_dir, f"pub_step_{self.step}.txt"), np.array([self.step]), fmt='%.1e')
         grasp_data = {
