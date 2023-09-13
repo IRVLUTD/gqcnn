@@ -39,6 +39,7 @@ import sys
 import datetime
 import threading
 import pickle
+from matplotlib import pyplot as plt
 
 from cv_bridge import CvBridge, CvBridgeError
 import ros_numpy
@@ -46,7 +47,7 @@ import rosnode
 import message_filters
 import tf2_ros
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Point32
+from geometry_msgs.msg import PointStamped
 
 from autolab_core import (Point, Logger, BinaryImage, CameraIntrinsics,
                           ColorImage, DepthImage)
@@ -59,7 +60,7 @@ from gqcnn.srv import GQCNNGraspPlanner, GQCNNGraspPlannerSegmask
 
 lock = threading.Lock()
 
-class ImageToGraspPubSub:
+class ImageToGraspPub:
     """Class for a publisher-subscriber listener to work with DexNet
 
     This class follows a publisher-subscriber model where it subscribes to an
@@ -91,29 +92,32 @@ class ImageToGraspPubSub:
         self,
         grasp_estimator,
         camera_intr,
+        data_staging_loc=None,
         visualize=False,
     ):
         self.estimator = grasp_estimator
         self.camera_intr = camera_intr
         self.visualize = visualize
+        self.data_dir = data_staging_loc
 
         self.depth_im = None
         self.mask_img = None
+        self.depth_frame_header = None
+        # self.depth_stamp = None
         self.base_frame = "base_link"
         self.SCALING_FACTOR = 1.0
         self.prev_step = None
         self.step = 0  # indicator for whether a new pc is registered
 
-        self.grasp_pub = rospy.Publisher("grasp2D", Point32, queue_size=10)
-        depth_sub = message_filters.Subscriber('/topdown_depth_img', Image, queue_size=10)
-        mask_sub  = message_filters.Subscriber("/topdown_depth_mask", Image, queue_size=10)
+        self.grasp_pub = rospy.Publisher("grasp2D", PointStamped, queue_size=10)
+        # depth_sub = message_filters.Subscriber('/topdown_depth_img', Image, queue_size=10)
+        # mask_sub  = message_filters.Subscriber("/topdown_depth_mask", Image, queue_size=10)
         queue_size = 1
         slop_seconds = 0.1
-        ts = message_filters.ApproximateTimeSynchronizer(
-            [depth_sub, mask_sub], queue_size, slop_seconds
-        )
-        ts.registerCallback(self.callback_points)
-
+        # ts = message_filters.ApproximateTimeSynchronizer(
+        #     [depth_sub, mask_sub], queue_size, slop_seconds
+        # )
+        # ts.registerCallback(self.callback_depth)
 
     def callback_depth(self, depth, mask):
         if depth.encoding == '32FC1':
@@ -134,40 +138,56 @@ class ImageToGraspPubSub:
         with lock:
             self.depth_im = depth_cv.copy()
             self.mask_img = mask_img.copy()
+            self.depth_frame_header = depth.header
             self.step += 1
-        
-        self.run_network()
+
+        # self.run_network()
+              
 
     def run_network(self):
         # New Images are not updated yet!
-        if self.depth_im is None or self.mask_img is None:
-            return
+        # if self.depth_im is None or self.mask_img is None:
+        #     return
         if self.prev_step == self.step:
+            return # SHOULD NOT HAPPEN!!
+
+        # depth_data = self.depth_im.copy()
+        # mask_data = self.mask_img.copy()
+        # mask_data = mask_data.astype(np.uint8)
+        curr_step = self.step
+        if not os.path.exists(os.path.join(self.data_dir, f"step_{curr_step}.txt")):
             return
 
-        self.prev_step = self.step
-        depth_data = self.depth_im.copy()
-        mask_data = self.mask_img.copy()
-        height, width = depth_im.shape
+        print(f"Registered new input data sample for step: {curr_step}!")
+        print("Proceeding with grasp sampling")
+
+        with open(os.path.join(self.data_dir, "input_data.pk"), 'rb') as pf:
+            input_data = pickle.load(pf)
+
+        depth_data = input_data['depth_img']
+        mask_data = input_data['mask_img']
+        exp_step = input_data['step']  
        
-        print("[LISTENER] Setting up network inputs...")
+        print(f"[LISTENER] Setting up network inputs for step:{exp_step}...")
         
         depth_im = DepthImage(depth_data, frame=self.camera_intr.frame)
-        mask_im  = BinaryImage(mask_data, frame=self.camera_intr.frame)
+        segmask  = BinaryImage(mask_data.astype(np.uint8), frame=self.camera_intr.frame)
         color_im = ColorImage(np.zeros([depth_im.height, depth_im.width, 3]).astype(np.uint8), frame=self.camera_intr.frame)
 
-        print("[LISTENER] Predicting Grasps....")
-        grasp_response = plan_grasp_segmask(color_im.rosmsg, depth_im.rosmsg,camera_intr.rosmsg, segmask.rosmsg)
-        grasp = grasp_response.grasp
+        # if self.visualize:
+        #     vis.figure(size=(10, 10))
+        #     vis.imshow(depth_im, vmin=0.5, vmax=0.9)
+        #     vis.title("Depth")
+        #     vis.show()
 
-        g2d = {
-            "uv": (grasp.center_px[0], grasp.center_px[1]),
-            "depth": grasp.depth,
-            "angle": grasp.angle
-        }
-        print(f"Grasp2D: {g2d}")
-        with open(f"/home/ninad/Desktop/grasp2d_{step}.pkl", "rb") as f:
-            pickle.dump(g2d, f)
+        #     vis.figure(size=(10, 10))
+        #     vis.imshow(segmask, vmin=0.5, vmax=0.9)
+        #     vis.title("Mask")
+        #     vis.show()
+
+        print("[LISTENER] Predicting Grasps....")
+        grasp_response = plan_grasp_segmask(color_im.rosmsg, depth_im.rosmsg, camera_intr.rosmsg, segmask.rosmsg)
+        grasp = grasp_response.grasp
 
         if self.visualize:
             g_center = Point(np.array([grasp.center_px[0], grasp.center_px[1]]),
@@ -180,47 +200,55 @@ class ImageToGraspPubSub:
             vis.figure(size=(10, 10))
             vis.imshow(depth_im, vmin=0.6, vmax=0.9)
             vis.grasp(grasp_2d, scale=2.5, show_center=True, show_axis=True)
-            vis.title("Planned grasp on depth (Q=%.3f)" % (action.q_value))
+            vis.title("Planned grasp on depth (Q=%.3f)" % (grasp.q_value))
             vis.show()
 
-        # Publish the Grasps as a Point32 message
-        print("[LISTENER] Publishing loop....")
+        # Publish the Grasps as a PointStamped message
+        print("[LISTENER] Publishing/Saving...")
+        np.savetxt(os.path.join(self.data_dir, f"pub_step_{self.step}.txt"), np.array([self.step]), fmt='%.1e')
+        grasp_data = {
+            "center" : (grasp.center_px[0], grasp.center_px[1]),
+            "angle"  : grasp.angle,
+            "z_depth": grasp.depth,
+            "q_value": grasp.q_value,
+            "step": self.step
+        }
+        print(grasp_data)
+        with open(os.path.join(self.data_dir, f"grasp_data_{self.step}.pk"), 'wb') as pf:
+            pickle.dump(grasp_data, pf)
+
         # ALTERNATIVE: Can also publish the custom Grasp msg after importing it in SceneReplica workspace
-        # Construct a Point32 message: (u, v, theta)
-        grasp_msg = Point32()
-        grasp_msg.x = grasp.center_px[0]
-        grasp_msg.y = grasp.center_px[1]
-        grasp_msg.z = grasp.angle
-        while True:
-            if self.grasp_pub.get_num_connections() > 0:
-                rospy.loginfo(
-                    f"[LISTENER] Publishing Grasp as Point32 msg!"
-                )
-                self.grasp_pub.publish(grasp_msg)
-                rospy.loginfo("[LISTENER] Finished publishing grasp msg.")
-                break
+        # Construct a Point message: (u, v, theta)
+        # grasp_msg = PointStamped()
+        # grasp_msg.header = self.depth_frame_header
+        # grasp_msg.point.x = grasp.center_px[0]
+        # grasp_msg.point.y = grasp.center_px[1]
+        # grasp_msg.point.z = grasp.angle
+        # while True:
+        #     if self.grasp_pub.get_num_connections() > 0:
+        #         rospy.loginfo(
+        #             f"[LISTENER] Publishing Grasp as Point32 msg!"
+        #         )
+        #         self.grasp_pub.publish(grasp_msg)
+        #         rospy.loginfo("[LISTENER] Finished publishing grasp msg.")
+        #         break
 
         print("[LISTENER] Returning from run_network() call...")
+        self.prev_step = self.step
+        self.step += 1
         print("=================================================================\n")
 
 
 def make_parser():
     # Parse args.
     parser = argparse.ArgumentParser(
-        description="Run a grasping policy on an example image")
-    parser.add_argument(
-        "--depth_image",
-        type=str,
-        default=None,
-        help="path to a test depth image stored as a .npy file")
-    parser.add_argument("--segmask",
-                        type=str,
-                        default=None,
-                        help="path to an optional segmask to use")
+        description="Run a grasping policy using ROS")
+
     parser.add_argument("--camera_intr",
                         type=str,
                         default=None,
-                        help="path to the camera intrinsics")
+                        help="path to the camera intrinsics",
+                        required=True)
     parser.add_argument("--gripper_width",
                         type=float,
                         default=0.05,
@@ -229,9 +257,8 @@ def make_parser():
                         type=str,
                         default="gqcnn",
                         help="namespace of the ROS grasp planning service")
-    parser.add_argument("--vis_grasp",
-                        type=bool,
-                        default=True,
+    parser.add_argument("--vis_grasp", 
+                        action='store_true',
                         help="whether or not to visualize the grasp")
     return parser
     
@@ -243,10 +270,11 @@ if __name__ == "__main__":
     camera_intr_filename = args.camera_intr
     namespace = args.namespace
     vis_grasp = args.vis_grasp
+    EXP_DIR = f"/home/ninad/Desktop/dexnet_exps"
 
     # Initialize the ROS node.
-    rospy.init_node("DexNet Grasping Node")
-    logging.getLogger().addHandler(rl.RosStreamHandler())
+    rospy.init_node("DexNetGraspingNode")
+    # logging.getLogger().addHandler(rl.RosStreamHandler())
     # Wait for grasp planning service and create service proxy.
     rospy.wait_for_service("%s/grasp_planner" % (namespace))
     rospy.wait_for_service("%s/grasp_planner_segmask" % (namespace))
@@ -257,9 +285,15 @@ if __name__ == "__main__":
     # Set up sensor.
     camera_intr = CameraIntrinsics.load(camera_intr_filename)
 
-    print("[INFO] Setting up the listener...")
-    listener = ImageToGraspPubSub(plan_grasp_segmask, camera_intr, vis_grasp)
-    print("[INFO] Starting the Subscribing-Publishing loop ...")
-    rospy.spin()
+    print("[INFO] Setting up the publisher...")
+    publisher = ImageToGraspPub(plan_grasp_segmask, camera_intr, EXP_DIR, vis_grasp)
+
+    print("[INFO] Starting the run network loop ...")
+    # rospy.spin()
+    while not rospy.is_shutdown():
+        try:
+            publisher.run_network()
+        except KeyboardInterrupt:
+                break    
     print("[INFO] Exiting DexNet ROS Node")
 
