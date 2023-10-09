@@ -25,3 +25,12 @@ Please see the [docs](https://berkeleyautomation.github.io/gqcnn/) for installat
 ## Citation
 If you use any part of this code in a publication, please cite [the appropriate Dex-Net publication](https://berkeleyautomation.github.io/gqcnn/index.html#academic-use).
 
+### SceneReplica experiments
+
+Please see `ros_nodes/scenereplica_ros_experiment.py` for running a publisher/subscriber loop. 
+
+- Run the DexNet grasp planning service as described in the documentation
+- Run the `scenereplica_ros_experiment.py` script.
+   - Assumes that a top-down depth and mask image is being published
+   - Plans the graps and publishes the (grasp center pixel, angle) as `Point` msg: (u, v, theta)
+   - Its a crude workaround to publish the grasp, feel free to implement a custom msg for this purpose and improve the code!
